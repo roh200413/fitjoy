@@ -6,12 +6,22 @@ cd backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload
+python run.py
 ```
 
 ## 기본 주소
-- API Docs: http://127.0.0.1:8000/docs
-- Health: http://127.0.0.1:8000/health
+- API Docs: http://127.0.0.1:8001/docs
+- Health: http://127.0.0.1:8001/health
+
+## 환경 변수
+`.env`에서 서버 포트를 관리합니다. 기본값은 `.env.example`을 참고하세요.
+
+```env
+BACKEND_HOST=0.0.0.0
+BACKEND_PORT=8001
+BACKEND_RELOAD=true
+CORS_ORIGINS=*
+```
 
 ## 구현 범위
 - 상품/고객/라이브 세션 생성/조회
