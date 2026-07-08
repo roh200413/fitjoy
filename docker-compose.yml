@@ -14,7 +14,7 @@ services:
         VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8011}
     image: ${FRONTEND_IMAGE:-fitjoy-frontend}:${IMAGE_TAG:-latest}
     ports:
-      - "8080:80"
+      - "3100:80"
     depends_on:
       - backend
     restart: unless-stopped

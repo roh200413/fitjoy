@@ -80,7 +80,7 @@ pipeline {
           done
 
           for i in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:8080/ >/dev/null && break
+            curl -fsS http://127.0.0.1:3100/ >/dev/null && break
             echo "Waiting for frontend... $i/30"
             sleep 2
           done
