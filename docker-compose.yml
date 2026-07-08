@@ -1,0 +1,20 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    image: ${BACKEND_IMAGE:-fitjoy-backend}:${IMAGE_TAG:-latest}
+    ports:
+      - "8011:8011"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8011}
+    image: ${FRONTEND_IMAGE:-fitjoy-frontend}:${IMAGE_TAG:-latest}
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
