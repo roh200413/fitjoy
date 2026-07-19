@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 from datetime import datetime
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -7,8 +9,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from .config import settings
-from .database import Base, engine, get_db
-from .models import ChangeHistory, Customer, InventoryMovement, LiveSession, Order, OrderItem, Product, Shipment
+from .database import Base, SessionLocal, engine, get_db
+from .models import AppSetting, ChangeHistory, Customer, InventoryMovement, LiveSession, Order, OrderItem, Product, Shipment
 from .schemas import (
     ChangeHistoryRead,
     CustomerCreate,
@@ -23,12 +25,21 @@ from .schemas import (
     OrderCreate,
     OrderRead,
     OrderUpdate,
+    PinChangeRequest,
+    PinVerifyRequest,
     ProductCreate,
     ProductRead,
     ProductUpdate,
     ShipmentRead,
     ShipmentUpdate,
 )
+
+PIN_SALT = "fitjoy-access-pin"
+DEFAULT_ACCESS_PIN = "0000"
+
+
+def hash_pin(pin: str) -> str:
+    return hashlib.sha256(f"{PIN_SALT}:{pin}".encode()).hexdigest()
 
 def ensure_schema():
     Base.metadata.create_all(bind=engine)
@@ -127,7 +138,11 @@ def ensure_schema():
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE shipments ADD COLUMN shipping_type VARCHAR(30) NOT NULL DEFAULT 'direct'"))
     live_column = next((column for column in inspector.get_columns("orders") if column["name"] == "live_id"), None)
-    if engine.dialect.name == "sqlite" and live_column and not live_column.get("nullable", True):
+    orders_pk_columns = inspector.get_pk_constraint("orders").get("constrained_columns") or []
+    orders_id_missing_pk = "id" not in orders_pk_columns
+    if engine.dialect.name == "sqlite" and (
+        (live_column and not live_column.get("nullable", True)) or orders_id_missing_pk
+    ):
         with engine.begin() as connection:
             connection.execute(text("PRAGMA foreign_keys=OFF"))
             connection.execute(
@@ -173,10 +188,6 @@ def ensure_schema():
             connection.execute(text("CREATE INDEX IF NOT EXISTS ix_orders_live_id ON orders (live_id)"))
             connection.execute(text("PRAGMA foreign_keys=ON"))
 
-
-ensure_schema()
-
-
 def raise_integrity_error(exc: IntegrityError):
     message = str(getattr(exc, "orig", exc))
     lowered = message.lower()
@@ -197,6 +208,8 @@ app.add_middleware(
 PAYMENT_STATUS = {"pending", "paid"}
 SHIPPING_STATUS = {"ready", "shipped", "delivered"}
 SHIPPING_TYPES = {"direct", "keep"}
+PAYMENT_STATUS_RANK = {"pending": 0, "paid": 1}
+SHIPPING_STATUS_RANK = {"ready": 0, "shipped": 1, "delivered": 2}
 
 
 def _history_value(value):
@@ -235,9 +248,171 @@ def normalize_product_payload(payload: ProductCreate | ProductUpdate):
     return data
 
 
+def merge_text_values(*values):
+    seen = []
+    for value in values:
+        normalized = (value or "").strip()
+        if normalized and normalized not in seen:
+            seen.append(normalized)
+    return "\n".join(seen) if seen else None
+
+
+def pick_latest_non_empty(records, field_name):
+    for record in sorted(records, key=lambda item: (item.updated_at or item.created_at or datetime.min), reverse=True):
+        value = getattr(record, field_name, None)
+        if isinstance(value, str):
+            value = value.strip()
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def merge_duplicate_orders():
+    db = SessionLocal()
+    try:
+        orders = (
+            db.query(Order)
+            .options(joinedload(Order.items), joinedload(Order.shipment))
+            .order_by(Order.customer_id.asc(), Order.live_id.asc(), Order.created_at.asc(), Order.id.asc())
+            .all()
+        )
+
+        grouped_orders = {}
+        for order in orders:
+            if order.live_id is None:
+                continue
+            grouped_orders.setdefault((order.customer_id, order.live_id), []).append(order)
+
+        dirty = False
+        for duplicate_orders in grouped_orders.values():
+            if len(duplicate_orders) < 2:
+                continue
+
+            primary_order = duplicate_orders[0]
+            merge_targets = duplicate_orders[1:]
+
+            merged_item_map = {item.product_id: item for item in primary_order.items}
+            all_shipments = [order.shipment for order in duplicate_orders if order.shipment]
+
+            for target_order in merge_targets:
+                for item in target_order.items:
+                    existing_item = merged_item_map.get(item.product_id)
+                    if existing_item:
+                        existing_item.quantity += item.quantity
+                        existing_item.unit_price = item.unit_price
+                        existing_item.line_amount = existing_item.quantity * existing_item.unit_price
+                        existing_item.product_name_snapshot = item.product_name_snapshot
+                        db.delete(item)
+                    else:
+                        item.order_id = primary_order.id
+                        merged_item_map[item.product_id] = item
+
+                db.query(InventoryMovement).filter(InventoryMovement.order_id == target_order.id).update(
+                    {InventoryMovement.order_id: primary_order.id},
+                    synchronize_session=False,
+                )
+
+                primary_order.shipping_fee = max(primary_order.shipping_fee or 0, target_order.shipping_fee or 0)
+                primary_order.settlement_date = max(primary_order.settlement_date, target_order.settlement_date)
+                primary_order.note = merge_text_values(primary_order.note, target_order.note)
+                if primary_order.stock_released_at is None or (
+                    target_order.stock_released_at and target_order.stock_released_at < primary_order.stock_released_at
+                ):
+                    primary_order.stock_released_at = target_order.stock_released_at or primary_order.stock_released_at
+
+                db.delete(target_order)
+                dirty = True
+
+            if all_shipments:
+                if not primary_order.shipment:
+                    primary_order.shipment = all_shipments[0]
+                shipment = primary_order.shipment
+                shipment.payment_status = min(
+                    (current.payment_status or "pending" for current in all_shipments),
+                    key=lambda value: PAYMENT_STATUS_RANK.get(value, 0),
+                )
+                paid_amounts = [current.paid_amount for current in all_shipments if current.paid_amount is not None]
+                shipment.paid_amount = sum(paid_amounts) if paid_amounts else None
+                shipment.paid_at = max((current.paid_at for current in all_shipments if current.paid_at), default=None)
+                shipment.shipping_type = "direct" if any(current.shipping_type == "direct" for current in all_shipments) else "keep"
+                shipment.shipping_status = min(
+                    (current.shipping_status or "ready" for current in all_shipments),
+                    key=lambda value: SHIPPING_STATUS_RANK.get(value, 0),
+                )
+                shipment.shipped_at = min((current.shipped_at for current in all_shipments if current.shipped_at), default=None)
+                shipment.delivered_at = max((current.delivered_at for current in all_shipments if current.delivered_at), default=None)
+                for field_name in (
+                    "receiver_name",
+                    "receiver_phone",
+                    "shipping_address1",
+                    "shipping_address2",
+                    "courier_name",
+                    "tracking_number",
+                ):
+                    setattr(shipment, field_name, pick_latest_non_empty(all_shipments, field_name))
+                shipment.memo = merge_text_values(*(current.memo for current in all_shipments), primary_order.note)
+
+            primary_order.total_product_amount = sum(item.line_amount for item in merged_item_map.values())
+
+        if dirty:
+            db.commit()
+    finally:
+        db.close()
+
+
+def recalculate_order_totals():
+    db = SessionLocal()
+    try:
+        orders = db.query(Order).options(joinedload(Order.items)).all()
+        dirty = False
+        for order in orders:
+            total = sum(item.quantity * item.unit_price for item in order.items)
+            if order.total_product_amount != total:
+                order.total_product_amount = total
+                dirty = True
+        if dirty:
+            db.commit()
+    finally:
+        db.close()
+
+
+def ensure_default_pin():
+    db = SessionLocal()
+    try:
+        if not db.query(AppSetting).first():
+            db.add(AppSetting(access_pin_hash=hash_pin(DEFAULT_ACCESS_PIN)))
+            db.commit()
+    finally:
+        db.close()
+
+
+ensure_schema()
+merge_duplicate_orders()
+recalculate_order_totals()
+ensure_default_pin()
+
+
 @app.get("/health")
 def health_check():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.post("/api/auth/verify-pin")
+def verify_pin(payload: PinVerifyRequest, db: Session = Depends(get_db)):
+    setting = db.query(AppSetting).first()
+    if not setting or not hmac.compare_digest(setting.access_pin_hash, hash_pin(payload.pin)):
+        raise HTTPException(status_code=401, detail="invalid pin")
+    return {"valid": True}
+
+
+@app.post("/api/auth/change-pin")
+def change_pin(payload: PinChangeRequest, db: Session = Depends(get_db)):
+    setting = db.query(AppSetting).first()
+    if not setting or not hmac.compare_digest(setting.access_pin_hash, hash_pin(payload.current_pin)):
+        raise HTTPException(status_code=401, detail="current pin is incorrect")
+    setting.access_pin_hash = hash_pin(payload.new_pin)
+    db.commit()
+    return {"valid": True}
 
 
 @app.get("/api/change-histories", response_model=list[ChangeHistoryRead])
@@ -388,56 +563,84 @@ def update_live_session(live_session_id: int, payload: LiveSessionUpdate, db: Se
 
 @app.post("/api/orders", response_model=OrderRead)
 def create_order(payload: OrderCreate, db: Session = Depends(get_db)):
-    if not payload.items:
-        raise HTTPException(status_code=400, detail="items is required")
     if payload.shipping_type not in SHIPPING_TYPES:
         raise HTTPException(status_code=400, detail="invalid shipping_type")
 
     customer = db.get(Customer, payload.customer_id)
     if not customer:
         raise HTTPException(status_code=404, detail="customer not found")
+    if payload.live_id is not None:
+        live_session = db.get(LiveSession, payload.live_id)
+        if not live_session:
+            raise HTTPException(status_code=404, detail="live session not found")
 
-    order = Order(
-        customer_id=payload.customer_id,
-        live_id=payload.live_id,
-        settlement_date=payload.settlement_date or datetime.utcnow().date(),
-        shipping_fee=payload.shipping_fee,
-        note=payload.note,
-        order_code=f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}",
-        total_product_amount=0,
+    order = (
+        db.query(Order)
+        .options(joinedload(Order.items), joinedload(Order.shipment))
+        .filter(Order.customer_id == payload.customer_id, Order.live_id == payload.live_id)
+        .first()
     )
-    db.add(order)
-    db.flush()
 
-    total = 0
+    if order and order.stock_released_at:
+        raise HTTPException(status_code=400, detail="already released order cannot be merged")
+
+    if not order:
+        order = Order(
+            customer_id=payload.customer_id,
+            live_id=payload.live_id,
+            settlement_date=payload.settlement_date or datetime.utcnow().date(),
+            shipping_fee=payload.shipping_fee,
+            note=payload.note,
+            order_code=f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}",
+            total_product_amount=0,
+        )
+        db.add(order)
+        db.flush()
+    else:
+        order.settlement_date = payload.settlement_date or order.settlement_date
+        order.shipping_fee = payload.shipping_fee
+        order.note = payload.note if payload.note is not None else order.note
+
+    item_map = {item.product_id: item for item in order.items}
+
     for item in payload.items:
         product = db.get(Product, item.product_id)
         if not product:
             db.rollback()
             raise HTTPException(status_code=404, detail=f"product {item.product_id} not found")
 
-        line_amount = item.quantity * item.unit_price
-        total += line_amount
-        db.add(
-            OrderItem(
+        existing_item = item_map.get(item.product_id)
+        if existing_item:
+            existing_item.quantity += item.quantity
+            existing_item.unit_price = item.unit_price
+            existing_item.line_amount = existing_item.quantity * existing_item.unit_price
+            existing_item.product_name_snapshot = product.product_name
+        else:
+            order_item = OrderItem(
                 order_id=order.id,
                 product_id=item.product_id,
                 product_name_snapshot=product.product_name,
                 quantity=item.quantity,
                 unit_price=item.unit_price,
-                line_amount=line_amount,
+                line_amount=item.quantity * item.unit_price,
+            )
+            db.add(order_item)
+            item_map[item.product_id] = order_item
+
+    order.total_product_amount = sum(item.line_amount for item in item_map.values())
+
+    if order.shipment:
+        order.shipment.shipping_type = payload.shipping_type
+    else:
+        db.add(
+            Shipment(
+                order_id=order.id,
+                payment_status="pending",
+                shipping_type=payload.shipping_type,
+                shipping_status="ready",
             )
         )
 
-    order.total_product_amount = total
-    db.add(
-        Shipment(
-            order_id=order.id,
-            payment_status="pending",
-            shipping_type=payload.shipping_type,
-            shipping_status="ready",
-        )
-    )
     db.commit()
 
     created = (
@@ -554,6 +757,46 @@ def release_order_stock(order_id: int, db: Session = Depends(get_db)):
     return updated
 
 
+@app.post("/api/orders/{order_id}/unrelease-stock", response_model=OrderRead)
+def unrelease_order_stock(order_id: int, db: Session = Depends(get_db)):
+    order = (
+        db.query(Order)
+        .options(joinedload(Order.items), joinedload(Order.shipment))
+        .filter(Order.id == order_id)
+        .first()
+    )
+    if not order:
+        raise HTTPException(status_code=404, detail="order not found")
+    if not order.stock_released_at:
+        raise HTTPException(status_code=400, detail="stock not released")
+
+    for item in order.items:
+        product = db.get(Product, item.product_id)
+        if not product:
+            raise HTTPException(status_code=404, detail=f"product {item.product_id} not found")
+        product.stock_quantity += item.quantity
+        db.add(
+            InventoryMovement(
+                product_id=item.product_id,
+                order_id=order.id,
+                movement_type="inbound",
+                quantity=item.quantity,
+                memo=f"release_cancelled:{order.order_code}",
+            )
+        )
+
+    order.stock_released_at = None
+    db.commit()
+
+    updated = (
+        db.query(Order)
+        .options(joinedload(Order.items), joinedload(Order.shipment))
+        .filter(Order.id == order.id)
+        .first()
+    )
+    return updated
+
+
 @app.get("/api/orders", response_model=list[OrderRead])
 def list_orders(db: Session = Depends(get_db)):
     return (
@@ -579,9 +822,6 @@ def get_order(order_id: int, db: Session = Depends(get_db)):
 
 @app.put("/api/orders/{order_id}", response_model=OrderRead)
 def update_order(order_id: int, payload: OrderUpdate, db: Session = Depends(get_db)):
-    if not payload.items:
-        raise HTTPException(status_code=400, detail="items is required")
-
     order = (
         db.query(Order)
         .options(joinedload(Order.items), joinedload(Order.shipment))
@@ -590,10 +830,9 @@ def update_order(order_id: int, payload: OrderUpdate, db: Session = Depends(get_
     )
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
-    if order.stock_released_at:
-        raise HTTPException(status_code=400, detail="released orders cannot be edited")
 
     before_values = {
+        "live_id": order.live_id,
         "settlement_date": order.settlement_date,
         "shipping_fee": order.shipping_fee,
         "shipping_type": order.shipment.shipping_type if order.shipment else None,
@@ -624,6 +863,12 @@ def update_order(order_id: int, payload: OrderUpdate, db: Session = Depends(get_
             )
         )
 
+    if payload.live_id is not None:
+        live_session = db.get(LiveSession, payload.live_id)
+        if not live_session:
+            raise HTTPException(status_code=404, detail="live session not found")
+
+    order.live_id = payload.live_id
     order.settlement_date = payload.settlement_date
     order.shipping_fee = payload.shipping_fee
     if payload.shipping_type not in SHIPPING_TYPES:
@@ -637,6 +882,7 @@ def update_order(order_id: int, payload: OrderUpdate, db: Session = Depends(get_
     order.items.extend(next_items)
 
     after_values = {
+        "live_id": order.live_id,
         "settlement_date": order.settlement_date,
         "shipping_fee": order.shipping_fee,
         "shipping_type": order.shipment.shipping_type if order.shipment else None,

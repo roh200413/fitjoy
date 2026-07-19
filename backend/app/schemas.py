@@ -88,6 +88,7 @@ class OrderCreate(BaseModel):
 
 
 class OrderUpdate(BaseModel):
+    live_id: Optional[int] = None
     settlement_date: date
     shipping_fee: int = Field(default=0, ge=0)
     shipping_type: str = Field(default="direct")
@@ -203,3 +204,12 @@ class InventoryMovementRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PinVerifyRequest(BaseModel):
+    pin: str = Field(min_length=1)
+
+
+class PinChangeRequest(BaseModel):
+    current_pin: str = Field(min_length=1)
+    new_pin: str = Field(min_length=4, max_length=12)

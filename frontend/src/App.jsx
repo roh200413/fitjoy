@@ -1,14 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8005'
 const EXCHANGE_RATE_STORAGE_KEY = 'fitjoy-exchange-rates'
 const DEFAULT_SHIPPING_FEE_STORAGE_KEY = 'fitjoy-default-shipping-fee'
+const PIN_UNLOCKED_STORAGE_KEY = 'fitjoy-pin-unlocked'
 
 const MENU = [
   { key: 'dashboard', label: '대시보드', group: 'main' },
   { key: 'calendar', label: '캘린더', group: 'main' },
   { key: 'orders', label: '주문 / 정산', group: 'main' },
-  { key: 'invoice-viewer', label: '정산서 뷰어', group: 'main' },
   { key: 'live-sessions', label: '라이브 관리', group: 'management' },
   { key: 'products', label: '상품 관리', group: 'management' },
   { key: 'inventory', label: '입고 관리', group: 'management' },
@@ -19,16 +19,16 @@ const MENU_ROUTE_MAP = {
   dashboard: '/dashboard',
   calendar: '/calendar',
   orders: '/orders',
-  'invoice-viewer': '/invoices',
   'live-sessions': '/live-sessions',
   products: '/products',
   inventory: '/inventory',
   customers: '/customers',
 }
 
-const ROUTE_MENU_MAP = Object.fromEntries(
-  Object.entries(MENU_ROUTE_MAP).map(([menuKey, path]) => [path, menuKey]),
-)
+const ROUTE_MENU_MAP = {
+  ...Object.fromEntries(Object.entries(MENU_ROUTE_MAP).map(([menuKey, path]) => [path, menuKey])),
+  '/invoices': 'orders',
+}
 
 const PAYMENT_LABELS = {
   pending: '입금 대기',
@@ -63,17 +63,18 @@ const HISTORY_FIELD_LABELS = {
 
 const money = (value) => Number(value || 0).toLocaleString('ko-KR')
 const todayKey = () => new Intl.DateTimeFormat('sv-SE').format(new Date())
+const todayMonthKey = () => todayKey().slice(0, 7)
 const getProductRowKey = (product) => (product.localId ? `draft-${product.localId}` : `product-${product.id}`)
 
 function getMenuKeyFromHash() {
-  if (typeof window === 'undefined') return 'invoice-viewer'
+  if (typeof window === 'undefined') return 'orders'
   const hash = window.location.hash || ''
   const route = hash.startsWith('#') ? hash.slice(1) : hash
-  return ROUTE_MENU_MAP[route] || 'invoice-viewer'
+  return ROUTE_MENU_MAP[route] || 'orders'
 }
 
 function getHashFromMenuKey(menuKey) {
-  return `#${MENU_ROUTE_MAP[menuKey] || MENU_ROUTE_MAP['invoice-viewer']}`
+  return `#${MENU_ROUTE_MAP[menuKey] || MENU_ROUTE_MAP.orders}`
 }
 
 function normalizeProductRow(product = {}) {
@@ -95,6 +96,11 @@ function toDateKey(value) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
   return new Intl.DateTimeFormat('sv-SE').format(date)
+}
+
+function toMonthKey(value) {
+  const dateKey = toDateKey(value)
+  return dateKey ? dateKey.slice(0, 7) : ''
 }
 
 function getCalendarDates(baseDateKey) {
@@ -309,27 +315,16 @@ function InvoiceViewer({ order, customer }) {
           </div>
         </section>
 
-        <section className="invoice-summary">
-          <div>
-            <span>상품 합계</span>
-            <strong>₩ {money(order.total_product_amount)}</strong>
-          </div>
-          <div>
-            <span>배송비</span>
-            <strong>₩ {money(shippingFee)}</strong>
-          </div>
-          <div>
-            <span>입금액</span>
-            <strong>₩ {money(paidAmount)}</strong>
-          </div>
-          <div>
-            <span>미정산액</span>
-            <strong>₩ {money(settlementGap)}</strong>
-          </div>
-          <div>
-            <span>최종 정산 금액</span>
-            <strong>₩ {money(settlementTotal)}</strong>
-          </div>
+        <section className="invoice-summary-line">
+          <span>
+            입금액 <strong>₩ {money(paidAmount)}</strong>
+          </span>
+          <span>
+            미정산액 <strong>₩ {money(settlementGap)}</strong>
+          </span>
+          <span className="accent">
+            최종 정산 금액 <strong>₩ {money(settlementTotal)}</strong>
+          </span>
         </section>
 
         <section className="invoice-table-block">
@@ -353,6 +348,12 @@ function InvoiceViewer({ order, customer }) {
                 </tr>
               ))}
             </tbody>
+            <tfoot>
+              <tr className="invoice-shipping-row">
+                <td colSpan={3}>배송비</td>
+                <td>₩ {money(shippingFee)}</td>
+              </tr>
+            </tfoot>
           </table>
         </section>
 
@@ -407,6 +408,51 @@ function InvoiceViewer({ order, customer }) {
   )
 }
 
+function PinGate({ onUnlock }) {
+  const [pin, setPin] = useState('')
+  const [error, setError] = useState('')
+  const [isVerifying, setIsVerifying] = useState(false)
+
+  async function handleSubmit(event) {
+    event.preventDefault()
+    setError('')
+    setIsVerifying(true)
+    try {
+      await api('/api/auth/verify-pin', {
+        method: 'POST',
+        body: JSON.stringify({ pin }),
+      })
+      onUnlock()
+    } catch (caughtError) {
+      setError('PIN이 올바르지 않습니다.')
+    } finally {
+      setIsVerifying(false)
+    }
+  }
+
+  return (
+    <div className="pin-gate">
+      <form className="pin-gate-card" onSubmit={handleSubmit}>
+        <div className="brand-badge">FJ</div>
+        <h2>FITJOY</h2>
+        <p>접근 PIN을 입력하세요.</p>
+        <input
+          type="password"
+          inputMode="numeric"
+          value={pin}
+          onChange={(event) => setPin(event.target.value)}
+          autoFocus
+          required
+        />
+        {error ? <div className="error-banner">{error}</div> : null}
+        <button type="submit" className="btn btn-primary" disabled={isVerifying}>
+          {isVerifying ? '확인 중...' : '입장'}
+        </button>
+      </form>
+    </div>
+  )
+}
+
 export default function App() {
   const today = todayKey()
   const emptyCustomerForm = {
@@ -419,10 +465,16 @@ export default function App() {
   }
   const emptyLiveForm = {
     live_title: '',
-    live_started_at: '',
-    live_ended_at: '',
+    live_started_at: today,
     memo: '',
   }
+  const [isPinUnlocked, setIsPinUnlocked] = useState(() => {
+    if (typeof window === 'undefined') return false
+    return window.localStorage.getItem(PIN_UNLOCKED_STORAGE_KEY) === 'true'
+  })
+  const [isPinChangeModalOpen, setIsPinChangeModalOpen] = useState(false)
+  const [pinChangeForm, setPinChangeForm] = useState({ current_pin: '', new_pin: '', confirm_pin: '' })
+  const [isChangingPin, setIsChangingPin] = useState(false)
   const [activeMenu, setActiveMenu] = useState(() => getMenuKeyFromHash())
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -435,6 +487,7 @@ export default function App() {
   const [inventoryMovements, setInventoryMovements] = useState([])
   const [selectedOrderId, setSelectedOrderId] = useState(null)
   const [invoiceFilterDate, setInvoiceFilterDate] = useState(today)
+  const [invoiceFilterMonth, setInvoiceFilterMonth] = useState(todayMonthKey())
   const [expandedOrderId, setExpandedOrderId] = useState(null)
   const [expandedInboundGroupKey, setExpandedInboundGroupKey] = useState(null)
   const [customerQuery, setCustomerQuery] = useState('')
@@ -447,7 +500,10 @@ export default function App() {
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false)
   const [isLiveModalOpen, setIsLiveModalOpen] = useState(false)
   const [isOrderModalOpen, setIsOrderModalOpen] = useState(false)
+  const [isCreateOrderPanelOpen, setIsCreateOrderPanelOpen] = useState(false)
+  const [isConfirmingBuyer, setIsConfirmingBuyer] = useState(false)
   const [isInboundModalOpen, setIsInboundModalOpen] = useState(false)
+  const [isInvoiceModalOpen, setIsInvoiceModalOpen] = useState(false)
   const [editingCustomerId, setEditingCustomerId] = useState(null)
   const [editingLiveId, setEditingLiveId] = useState(null)
   const [productDrafts, setProductDrafts] = useState([])
@@ -462,6 +518,12 @@ export default function App() {
   const [releasingOrderId, setReleasingOrderId] = useState(null)
   const [updatingPaymentOrderId, setUpdatingPaymentOrderId] = useState(null)
   const [updatingShippingOrderId, setUpdatingShippingOrderId] = useState(null)
+  const [updatingShippingTypeOrderId, setUpdatingShippingTypeOrderId] = useState(null)
+  const [updatingSettlementDateOrderId, setUpdatingSettlementDateOrderId] = useState(null)
+  const [memoOrderId, setMemoOrderId] = useState(null)
+  const [memoDraft, setMemoDraft] = useState('')
+  const [isSavingMemo, setIsSavingMemo] = useState(false)
+  const [selectedInvoiceLiveId, setSelectedInvoiceLiveId] = useState('')
 
   const productRowRefs = useRef({})
   const nextProductDraftId = useRef(1)
@@ -482,10 +544,10 @@ export default function App() {
     shipping_fee: loadDefaultShippingFee(),
     shipping_type: 'direct',
     note: '',
-    items: [{ product_id: '', quantity: 1, unit_price: 0 }],
   })
 
   const [orderDetailForm, setOrderDetailForm] = useState({
+    live_id: null,
     settlement_date: today,
     shipping_fee: 0,
     shipping_type: 'direct',
@@ -649,6 +711,64 @@ export default function App() {
     () => orders.find((order) => order.id === expandedOrderId) || null,
     [orders, expandedOrderId],
   )
+  const memoOrder = useMemo(
+    () => orders.find((order) => order.id === memoOrderId) || null,
+    [orders, memoOrderId],
+  )
+  const invoiceLiveCards = useMemo(() => {
+    return liveSessions
+      .filter((live) => {
+        if (!invoiceFilterMonth) return true
+        return toMonthKey(live.live_started_at) === invoiceFilterMonth
+      })
+      .map((live) => {
+        const liveOrders = orders.filter((order) => String(order.live_id || '') === String(live.id))
+        return {
+          ...live,
+          orderCount: liveOrders.length,
+          totalAmount: liveOrders.reduce(
+            (acc, order) => acc + Number(order.total_product_amount || 0) + Number(order.shipping_fee || 0),
+            0,
+          ),
+        }
+      })
+      .sort((a, b) => String(b.live_started_at || '').localeCompare(String(a.live_started_at || '')))
+  }, [invoiceFilterMonth, liveSessions, orders])
+  const selectedInvoiceLive = useMemo(() => {
+    if (!invoiceLiveCards.length) return null
+    return invoiceLiveCards.find((live) => String(live.id) === String(selectedInvoiceLiveId)) || invoiceLiveCards[0]
+  }, [invoiceLiveCards, selectedInvoiceLiveId])
+  const liveInvoiceOrders = useMemo(() => {
+    if (!selectedInvoiceLive) return []
+    return orders
+      .filter((order) => String(order.live_id || '') === String(selectedInvoiceLive.id))
+      .sort((a, b) => new Date(b.created_at || b.settlement_date) - new Date(a.created_at || a.settlement_date))
+  }, [orders, selectedInvoiceLive])
+  const liveInvoiceCustomerGroups = useMemo(() => {
+    const grouped = new Map()
+    liveInvoiceOrders.forEach((order) => {
+      const key = String(order.customer_id)
+      const customer = customers.find((item) => String(item.id) === key) || null
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          key,
+          customer,
+          order,
+          totalAmount: 0,
+        })
+      }
+      const entry = grouped.get(key)
+      entry.totalAmount += Number(order.total_product_amount || 0) + Number(order.shipping_fee || 0)
+      if (new Date(order.created_at || order.settlement_date) > new Date(entry.order.created_at || entry.order.settlement_date)) {
+        entry.order = order
+      }
+    })
+    return [...grouped.values()].sort((a, b) => {
+      const left = a.customer?.customer_name || a.customer?.instagram_id || a.key
+      const right = b.customer?.customer_name || b.customer?.instagram_id || b.key
+      return left.localeCompare(right, 'ko')
+    })
+  }, [customers, liveInvoiceOrders])
   const shipmentHistories = useMemo(
     () => changeHistories.filter((history) => history.entity_type === 'shipment').slice(0, 8),
     [changeHistories],
@@ -717,12 +837,6 @@ export default function App() {
   useEffect(() => {
     productRowsRef.current = productTableRows
   }, [productTableRows])
-
-  const orderTotalPreview = orderForm.items.reduce(
-    (acc, item) => acc + Number(item.quantity || 0) * Number(item.unit_price || 0),
-    0,
-  )
-  const orderGrandTotalPreview = orderTotalPreview + Number(orderForm.shipping_fee || 0)
 
   async function refreshAll() {
     try {
@@ -843,6 +957,16 @@ export default function App() {
   }, [filteredInvoiceOrders, selectedOrderId])
 
   useEffect(() => {
+    if (!invoiceLiveCards.length) {
+      if (selectedInvoiceLiveId) setSelectedInvoiceLiveId('')
+      return
+    }
+    if (!selectedInvoiceLiveId || !invoiceLiveCards.some((live) => String(live.id) === String(selectedInvoiceLiveId))) {
+      setSelectedInvoiceLiveId(String(invoiceLiveCards[0].id))
+    }
+  }, [invoiceLiveCards, selectedInvoiceLiveId])
+
+  useEffect(() => {
     if (!orderForm.customer_id) return
     const selectedCustomer = customers.find((customer) => String(customer.id) === String(orderForm.customer_id))
     if (selectedCustomer) {
@@ -851,7 +975,7 @@ export default function App() {
   }, [customers, orderForm.customer_id])
 
   useEffect(() => {
-    setOrderForm((prev) => (prev.customer_id || prev.note || prev.items.some((item) => item.product_id) ? prev : {
+    setOrderForm((prev) => (prev.customer_id || prev.note ? prev : {
       ...prev,
       shipping_fee: defaultShippingFee,
     }))
@@ -886,33 +1010,23 @@ export default function App() {
     }
   }, [])
 
-  function setOrderItem(index, key, value) {
-    setOrderForm((prev) => {
-      const nextItems = [...prev.items]
-      nextItems[index] = { ...nextItems[index], [key]: value }
-      return { ...prev, items: nextItems }
-    })
+  function getProductSearchValue(item) {
+    if (item.product_query !== undefined) return item.product_query
+    return products.find((product) => String(product.id) === String(item.product_id))?.product_name || ''
   }
 
-  function addOrderItem() {
-    setOrderForm((prev) => ({
-      ...prev,
-      items: [...prev.items, { product_id: '', quantity: 1, unit_price: 0 }],
-    }))
-  }
-
-  function removeOrderItem(index) {
-    setOrderForm((prev) => {
-      const nextItems = prev.items.filter((_, itemIndex) => itemIndex !== index)
-      return {
-        ...prev,
-        items: nextItems.length ? nextItems : [{ product_id: '', quantity: 1, unit_price: 0 }],
-      }
-    })
+  function applyProductSearchSelection(setItemFn, index, typedValue) {
+    const matched = products.find((product) => product.product_name === typedValue)
+    setItemFn(index, 'product_query', typedValue)
+    setItemFn(index, 'product_id', matched ? String(matched.id) : '')
+    if (matched) {
+      setItemFn(index, 'unit_price', matched.live_price)
+    }
   }
 
   function hydrateOrderDetailForm(order) {
     setOrderDetailForm({
+      live_id: order?.live_id ?? null,
       settlement_date: toDateKey(order?.settlement_date) || today,
       shipping_fee: Number(order?.shipping_fee || 0),
       shipping_type: order?.shipment?.shipping_type || 'direct',
@@ -954,6 +1068,42 @@ export default function App() {
   function selectCustomer(customer) {
     setOrderForm((prev) => ({ ...prev, customer_id: String(customer.id) }))
     setCustomerQuery(getCustomerOptionLabel(customer))
+  }
+
+  async function confirmOrderHeader() {
+    if (!selectedInvoiceLive) {
+      setError('라이브를 먼저 선택해 주세요.')
+      return
+    }
+    if (!orderForm.customer_id) {
+      setError('구매자를 먼저 선택해 주세요.')
+      return
+    }
+
+    setError('')
+    setIsConfirmingBuyer(true)
+    try {
+      await api('/api/orders', {
+        method: 'POST',
+        body: JSON.stringify({
+          customer_id: Number(orderForm.customer_id),
+          live_id: Number(selectedInvoiceLive.id),
+          settlement_date: orderForm.settlement_date || today,
+          shipping_fee: Number(orderForm.shipping_fee || 0),
+          shipping_type: orderForm.shipping_type,
+          note: orderForm.note,
+          items: [],
+        }),
+      })
+      await refreshAll()
+      resetOrderFormState()
+      setIsCreateOrderPanelOpen(false)
+      setIsOrderModalOpen(false)
+    } catch (caughtError) {
+      setError(getReadableErrorMessage(caughtError))
+    } finally {
+      setIsConfirmingBuyer(false)
+    }
   }
 
   function setInboundItem(index, key, value) {
@@ -1250,14 +1400,6 @@ export default function App() {
     setCustomerForm(emptyCustomerForm)
   }
 
-  function toDateTimeLocalValue(value) {
-    if (!value) return ''
-    const date = new Date(value)
-    if (Number.isNaN(date.getTime())) return ''
-    const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000)
-    return local.toISOString().slice(0, 16)
-  }
-
   function openCreateLiveModal() {
     setEditingLiveId(null)
     setLiveForm(emptyLiveForm)
@@ -1268,8 +1410,7 @@ export default function App() {
     setEditingLiveId(live.id)
     setLiveForm({
       live_title: live.live_title || '',
-      live_started_at: toDateTimeLocalValue(live.live_started_at),
-      live_ended_at: toDateTimeLocalValue(live.live_ended_at),
+      live_started_at: toDateKey(live.live_started_at),
       memo: live.memo || '',
     })
     setIsLiveModalOpen(true)
@@ -1288,12 +1429,15 @@ export default function App() {
       shipping_fee: defaultShippingFee,
       shipping_type: 'direct',
       note: '',
-      items: [{ product_id: '', quantity: 1, unit_price: 0 }],
     })
     setCustomerQuery('')
   }
 
   function openOrderModal() {
+    if (!selectedInvoiceLive) {
+      setError('라이브를 먼저 선택해 주세요.')
+      return
+    }
     resetOrderFormState()
     setIsOrderModalOpen(true)
   }
@@ -1412,43 +1556,10 @@ export default function App() {
         body: JSON.stringify({
           ...liveForm,
           live_started_at: liveForm.live_started_at || null,
-          live_ended_at: liveForm.live_ended_at || null,
         }),
       })
       await refreshAll()
       closeLiveModal()
-    } catch (caughtError) {
-      setError(String(caughtError.message || caughtError))
-    }
-  }
-
-  async function submitOrder(event) {
-    event.preventDefault()
-    if (!orderForm.items.length) return
-    setError('')
-
-    try {
-      await api('/api/orders', {
-        method: 'POST',
-        body: JSON.stringify({
-          customer_id: Number(orderForm.customer_id),
-          settlement_date: orderForm.settlement_date || today,
-          shipping_fee: Number(orderForm.shipping_fee || 0),
-          shipping_type: orderForm.shipping_type,
-          note: orderForm.note,
-          items: orderForm.items.map((item) => ({
-            product_id: Number(item.product_id),
-            quantity: Number(item.quantity),
-            unit_price: Number(item.unit_price),
-          })),
-        }),
-      })
-
-      resetOrderFormState()
-      setIsOrderModalOpen(false)
-      await refreshAll()
-      setInvoiceFilterDate(orderForm.settlement_date || today)
-      goToMenu('invoice-viewer')
     } catch (caughtError) {
       setError(String(caughtError.message || caughtError))
     }
@@ -1484,6 +1595,14 @@ export default function App() {
   async function submitOrderDetail(event) {
     event.preventDefault()
     if (!expandedOrderId || !orderDetailForm.items.length) return
+
+    if (expandedOrder?.stock_released_at) {
+      const confirmed = window.confirm(
+        '이미 출고 처리된 주문입니다. 품목을 변경해도 이미 차감된 재고 수량은 자동으로 되돌아가지 않습니다.\n그래도 판매 항목을 변경하시겠습니까?',
+      )
+      if (!confirmed) return
+    }
+
     setError('')
     setIsOrderSaving(true)
 
@@ -1491,6 +1610,7 @@ export default function App() {
       await api(`/api/orders/${expandedOrderId}`, {
         method: 'PUT',
         body: JSON.stringify({
+          live_id: orderDetailForm.live_id ?? null,
           settlement_date: orderDetailForm.settlement_date || today,
           shipping_fee: Number(orderDetailForm.shipping_fee || 0),
           shipping_type: orderDetailForm.shipping_type,
@@ -1553,6 +1673,35 @@ export default function App() {
     }
   }
 
+  async function unreleaseOrderStock(orderId) {
+    setError('')
+    setReleasingOrderId(orderId)
+
+    try {
+      await api(`/api/orders/${orderId}/unrelease-stock`, {
+        method: 'POST',
+      })
+      await refreshAll()
+    } catch (caughtError) {
+      setError(String(caughtError.message || caughtError))
+    } finally {
+      setReleasingOrderId(null)
+    }
+  }
+
+  function toggleOrderStockRelease(order) {
+    if (order.stock_released_at) {
+      const confirmed = window.confirm('정말 되돌리시겠습니까? 차감된 재고 수량이 복구됩니다.')
+      if (!confirmed) return
+      unreleaseOrderStock(order.id)
+      return
+    }
+
+    const confirmed = window.confirm('출고 완료 처리하시겠습니까? 실제로 출고된 게 맞는지 확인해 주세요.')
+    if (!confirmed) return
+    releaseOrderStock(order.id)
+  }
+
   async function updateOrderPaymentStatus(order, nextStatus) {
     if (!order?.id) return
     setError('')
@@ -1604,11 +1753,107 @@ export default function App() {
     }
   }
 
+  async function updateOrderShippingType(order, nextType) {
+    if (!order?.id) return
+    setError('')
+    setUpdatingShippingTypeOrderId(order.id)
+
+    try {
+      await api(`/api/shipments/${order.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ shipping_type: nextType }),
+      })
+      await refreshAll()
+    } catch (caughtError) {
+      setError(String(caughtError.message || caughtError))
+    } finally {
+      setUpdatingShippingTypeOrderId(null)
+    }
+  }
+
+  async function updateOrderSettlementDate(order, nextDate) {
+    if (!order?.id || !nextDate) return
+    setError('')
+    setUpdatingSettlementDateOrderId(order.id)
+
+    try {
+      await api(`/api/orders/${order.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          live_id: order.live_id ?? null,
+          settlement_date: nextDate,
+          shipping_fee: Number(order.shipping_fee || 0),
+          shipping_type: order.shipment?.shipping_type || 'direct',
+          note: order.note || null,
+          items: order.items.map((item) => ({
+            product_id: item.product_id,
+            quantity: item.quantity,
+            unit_price: item.unit_price,
+          })),
+        }),
+      })
+      await refreshAll()
+    } catch (caughtError) {
+      setError(getReadableErrorMessage(caughtError))
+    } finally {
+      setUpdatingSettlementDateOrderId(null)
+    }
+  }
+
+  function openMemoPopup(order) {
+    setMemoOrderId(order.id)
+    setMemoDraft(order.note || '')
+  }
+
+  function closeMemoPopup() {
+    setMemoOrderId(null)
+    setMemoDraft('')
+  }
+
+  async function submitMemo(event) {
+    event.preventDefault()
+    if (!memoOrder) return
+    setError('')
+    setIsSavingMemo(true)
+
+    try {
+      await api(`/api/orders/${memoOrder.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          live_id: memoOrder.live_id ?? null,
+          settlement_date: toDateKey(memoOrder.settlement_date) || today,
+          shipping_fee: Number(memoOrder.shipping_fee || 0),
+          shipping_type: memoOrder.shipment?.shipping_type || 'direct',
+          note: memoDraft || null,
+          items: memoOrder.items.map((item) => ({
+            product_id: item.product_id,
+            quantity: item.quantity,
+            unit_price: item.unit_price,
+          })),
+        }),
+      })
+      await refreshAll()
+      closeMemoPopup()
+    } catch (caughtError) {
+      setError(getReadableErrorMessage(caughtError))
+    } finally {
+      setIsSavingMemo(false)
+    }
+  }
+
   function openInvoiceViewerForOrder(order) {
     if (!order) return
     setSelectedOrderId(order.id)
+    if (order.live_id) {
+      setSelectedInvoiceLiveId(String(order.live_id))
+    }
     setInvoiceFilterDate(toDateKey(order.settlement_date) || today)
-    goToMenu('invoice-viewer')
+    setIsInvoiceModalOpen(true)
+    goToMenu('orders')
+  }
+
+  function closeInvoiceModal() {
+    setIsInvoiceModalOpen(false)
   }
 
   function submitExchangeRate(event) {
@@ -1636,6 +1881,53 @@ export default function App() {
       delete next[date]
       return next
     })
+  }
+
+  function lockApp() {
+    window.localStorage.removeItem(PIN_UNLOCKED_STORAGE_KEY)
+    setIsPinUnlocked(false)
+  }
+
+  function closePinChangeModal() {
+    setIsPinChangeModalOpen(false)
+    setPinChangeForm({ current_pin: '', new_pin: '', confirm_pin: '' })
+  }
+
+  async function submitPinChange(event) {
+    event.preventDefault()
+    setError('')
+
+    if (pinChangeForm.new_pin !== pinChangeForm.confirm_pin) {
+      setError('새 PIN이 일치하지 않습니다.')
+      return
+    }
+
+    setIsChangingPin(true)
+    try {
+      await api('/api/auth/change-pin', {
+        method: 'POST',
+        body: JSON.stringify({
+          current_pin: pinChangeForm.current_pin,
+          new_pin: pinChangeForm.new_pin,
+        }),
+      })
+      closePinChangeModal()
+    } catch (caughtError) {
+      setError(getReadableErrorMessage(caughtError))
+    } finally {
+      setIsChangingPin(false)
+    }
+  }
+
+  if (!isPinUnlocked) {
+    return (
+      <PinGate
+        onUnlock={() => {
+          window.localStorage.setItem(PIN_UNLOCKED_STORAGE_KEY, 'true')
+          setIsPinUnlocked(true)
+        }}
+      />
+    )
   }
 
   return (
@@ -1673,9 +1965,70 @@ export default function App() {
           <br />- 결제 / 배송 상태를 동시에 점검
           <br />- 고객 주소와 연락처 누락 여부 확인
         </div>
+        <div className="sidebar-pin-actions">
+          <button type="button" className="btn btn-light" onClick={() => setIsPinChangeModalOpen(true)}>
+            PIN 변경
+          </button>
+          <button type="button" className="btn btn-light" onClick={lockApp}>
+            잠금
+          </button>
+        </div>
       </aside>
 
+      {isPinChangeModalOpen ? (
+        <Modal title="PIN 변경" sub="현재 PIN을 확인한 뒤 새 PIN으로 바꿉니다." onClose={closePinChangeModal}>
+          <form className="form-grid" onSubmit={submitPinChange}>
+            <label>
+              현재 PIN
+              <input
+                type="password"
+                inputMode="numeric"
+                value={pinChangeForm.current_pin}
+                onChange={(event) => setPinChangeForm((prev) => ({ ...prev, current_pin: event.target.value }))}
+                required
+              />
+            </label>
+            <label>
+              새 PIN
+              <input
+                type="password"
+                inputMode="numeric"
+                minLength={4}
+                value={pinChangeForm.new_pin}
+                onChange={(event) => setPinChangeForm((prev) => ({ ...prev, new_pin: event.target.value }))}
+                required
+              />
+            </label>
+            <label>
+              새 PIN 확인
+              <input
+                type="password"
+                inputMode="numeric"
+                minLength={4}
+                value={pinChangeForm.confirm_pin}
+                onChange={(event) => setPinChangeForm((prev) => ({ ...prev, confirm_pin: event.target.value }))}
+                required
+              />
+            </label>
+            <div className="full actions-row">
+              <button type="button" className="btn btn-light" onClick={closePinChangeModal}>
+                취소
+              </button>
+              <button type="submit" className="btn btn-primary" disabled={isChangingPin}>
+                {isChangingPin ? '변경 중...' : '변경'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      ) : null}
+
       <main className="main">
+        <datalist id="product-options">
+          {products.map((product) => (
+            <option key={product.id} value={product.product_name} />
+          ))}
+        </datalist>
+
         <section className="topbar">
           <div>
             <h2>{MENU.find((item) => item.key === activeMenu)?.label || '대시보드'}</h2>
@@ -1808,7 +2161,7 @@ export default function App() {
                       <h5>정산서 뷰어</h5>
                       <p>주문 / 정산 테이블 기반 문서를 반 A4 비율로 시각화합니다.</p>
                     </div>
-                    <button type="button" className="btn btn-primary" onClick={() => goToMenu('invoice-viewer')}>
+                    <button type="button" className="btn btn-primary" onClick={() => goToMenu('orders')}>
                       열기
                     </button>
                   </div>
@@ -1963,7 +2316,7 @@ export default function App() {
                           className="calendar-link"
                           onClick={() => {
                             setInvoiceFilterDate(dateKey)
-                            goToMenu('invoice-viewer')
+                            goToMenu('orders')
                           }}
                         >
                           전체 보기
@@ -1980,7 +2333,7 @@ export default function App() {
                               onClick={() => {
                                 setInvoiceFilterDate(dateKey)
                                 setSelectedOrderId(order.id)
-                                goToMenu('invoice-viewer')
+                                goToMenu('orders')
                               }}
                             >
                               {getInvoiceDocumentName(order, customer)}
@@ -1999,8 +2352,18 @@ export default function App() {
         )}
 
         {isOrderModalOpen ? (
-          <Modal title="주문 입력" sub="고객을 선택하고 배송 유형, 품목을 입력하세요." onClose={closeOrderModal}>
-            <form className="form-grid" onSubmit={submitOrder}>
+          <Modal title="주문 입력" sub="고객을 선택하고 배송 유형을 입력하세요." onClose={closeOrderModal}>
+            <form
+              className="form-grid"
+              onSubmit={(event) => {
+                event.preventDefault()
+                confirmOrderHeader()
+              }}
+            >
+              <div className="full invoice-filter-control">
+                <span>Live</span>
+                <strong>{selectedInvoiceLive?.live_title || '-'}</strong>
+              </div>
               <label>
                 고객
                 <div className="typeahead-field">
@@ -2101,78 +2464,33 @@ export default function App() {
                 <input
                   value={orderForm.note}
                   onChange={(event) => setOrderForm((prev) => ({ ...prev, note: event.target.value }))}
-                  placeholder="DM 확인 사항, 합배송 요청 등"
+                  placeholder="DM memo"
                 />
               </label>
 
-              <div className="full">
-                <div className="section-head compact">
-                  <h4>주문 품목</h4>
-                  <button type="button" className="btn btn-light" onClick={addOrderItem}>
-                    품목 추가
-                  </button>
-                </div>
-
-                <div className="line-items">
-                  {orderForm.items.map((item, index) => (
-                    <div className="line-item" key={`${index}-${item.product_id}`}>
-                      <select
-                        value={item.product_id}
-                        onChange={(event) => {
-                          const product = products.find((row) => String(row.id) === event.target.value)
-                          setOrderItem(index, 'product_id', event.target.value)
-                          if (product) {
-                            setOrderItem(index, 'unit_price', product.live_price)
-                          }
-                        }}
-                        required
-                      >
-                        <option value="">상품 선택</option>
-                        {products.map((product) => (
-                          <option key={product.id} value={product.id}>
-                            {product.product_name}
-                          </option>
-                        ))}
-                      </select>
-
-                      <input
-                        type="number"
-                        min="1"
-                        value={item.quantity}
-                        onChange={(event) => setOrderItem(index, 'quantity', event.target.value)}
-                        required
-                      />
-
-                      <input
-                        type="number"
-                        min="0"
-                        value={item.unit_price}
-                        onChange={(event) => setOrderItem(index, 'unit_price', event.target.value)}
-                        required
-                      />
-
-                      <div className="line-total">₩ {money(Number(item.quantity) * Number(item.unit_price))}</div>
-
-                      <button type="button" className="btn btn-light" onClick={() => removeOrderItem(index)}>
-                        삭제
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
               <div className="full actions-row">
-                <strong>총액: ₩ {money(orderTotalPreview)}</strong>
-                <button type="submit" className="btn btn-primary">
-                  주문 생성
+                <button type="submit" className="btn btn-primary" disabled={isConfirmingBuyer}>
+                  {isConfirmingBuyer ? '등록 중...' : '구매자 등록'}
                 </button>
               </div>
             </form>
           </Modal>
         ) : null}
 
+        {isInvoiceModalOpen ? (
+          <Modal
+            title="정산서 보기"
+            sub={selectedOrder ? getInvoiceDocumentName(selectedOrder, selectedCustomer) : '선택한 정산서를 확인합니다.'}
+            onClose={closeInvoiceModal}
+          >
+            <InvoiceViewer order={selectedOrder} customer={selectedCustomer} />
+          </Modal>
+        ) : null}
+
         {activeMenu === 'orders' && (
           <div className="content-grid single">
+            {false ? (
+              <>
             <Card>
               <div className="inline-title-row">
                 <h4>주문 목록</h4>
@@ -2371,25 +2689,15 @@ export default function App() {
                     <div className="line-items">
                       {orderDetailForm.items.map((item, index) => (
                         <div className="line-item" key={`detail-${index}-${item.product_id}`}>
-                          <select
-                            value={item.product_id}
-                            onChange={(event) => {
-                              const product = products.find((row) => String(row.id) === event.target.value)
-                              setOrderDetailItem(index, 'product_id', event.target.value)
-                              if (product) {
-                                setOrderDetailItem(index, 'unit_price', product.live_price)
-                              }
-                            }}
+                          <input
+                            type="text"
+                            list="product-options"
+                            value={getProductSearchValue(item)}
+                            onChange={(event) => applyProductSearchSelection(setOrderDetailItem, index, event.target.value)}
+                            placeholder="상품명 검색"
                             disabled={Boolean(expandedOrder.stock_released_at)}
                             required
-                          >
-                            <option value="">상품 선택</option>
-                            {products.map((product) => (
-                              <option key={product.id} value={product.id}>
-                                {product.product_name}
-                              </option>
-                            ))}
-                          </select>
+                          />
 
                           <input
                             type="number"
@@ -2442,53 +2750,413 @@ export default function App() {
                 </form>
               </Card>
             ) : null}
-          </div>
-        )}
-
-        {activeMenu === 'invoice-viewer' && (
-          <section className="invoice-layout">
+              </>
+            ) : null}
             <Card
-              title="정산서 목록"
-              sub="날짜를 기준으로 정산서를 관리합니다."
+              title="라이브별 정산서"
+              sub="라이브 카드를 선택한 뒤 구매자별 정산서를 버튼으로 확인합니다."
               action={
-                <div className="invoice-filter-control">
-                  <span>기준일</span>
-                  <input
-                    type="date"
-                    value={invoiceFilterDate}
-                    onChange={(event) => setInvoiceFilterDate(event.target.value)}
-                  />
+                <div className="invoice-header-actions">
+                  <label className="inline-filter">
+                    기준월
+                    <input
+                      type="month"
+                      value={invoiceFilterMonth}
+                      onChange={(event) => setInvoiceFilterMonth(event.target.value)}
+                    />
+                  </label>
+                  <button type="button" className="btn btn-primary" onClick={openCreateLiveModal}>
+                    라이브 추가
+                  </button>
                 </div>
               }
             >
-              <div className="invoice-selector-list">
-                {filteredInvoiceOrders.length ? filteredInvoiceOrders.map((order) => {
-                  const customer = customers.find((item) => item.id === order.customer_id)
-                  return (
-                    <button
-                      key={order.id}
-                      type="button"
-                      className={`invoice-selector ${selectedOrder?.id === order.id ? 'active' : ''}`}
-                      onClick={() => setSelectedOrderId(order.id)}
-                    >
-                      <div>
-                        <strong>{getInvoiceDocumentName(order, customer)}</strong>
-                        <span>{customer?.instagram_id || `고객 #${order.customer_id}`}</span>
-                      </div>
-                      <div className="invoice-selector-meta">
-                        <span>₩ {money(order.total_product_amount)}</span>
-                        <small>{PAYMENT_LABELS[order.shipment?.payment_status] || '-'}</small>
-                      </div>
-                    </button>
-                  )
-                }) : <div className="muted">선택한 날짜의 정산서가 없습니다.</div>}
+              <div className="invoice-selector-list horizontal">
+                {invoiceLiveCards.length ? invoiceLiveCards.map((live) => (
+                  <button
+                    key={live.id}
+                    type="button"
+                    className={`invoice-selector compact ${String(selectedInvoiceLive?.id) === String(live.id) ? 'active' : ''}`}
+                    onClick={() => setSelectedInvoiceLiveId(String(live.id))}
+                  >
+                    <div>
+                      <strong>{live.live_title}</strong>
+                      <span>{formatDateTime(live.live_started_at)}</span>
+                    </div>
+                    <div className="invoice-selector-meta">
+                      <strong>{live.orderCount}건</strong>
+                      <small>₩ {money(live.totalAmount)}</small>
+                    </div>
+                  </button>
+                )) : <div className="muted">등록된 라이브가 없습니다.</div>}
               </div>
             </Card>
 
-            <Card title="정산서 미리보기" sub={`${invoiceFilterDate} 기준 정산서`}>
-              <InvoiceViewer order={selectedFilteredOrder} customer={selectedCustomer} />
+            {!isCreateOrderPanelOpen ? (
+              <button
+                type="button"
+                className="create-order-toggle-btn create-order-panel"
+                onClick={() => setIsCreateOrderPanelOpen(true)}
+              >
+                + 신규 주문 등록
+              </button>
+            ) : (
+            <Card
+              className="create-order-panel"
+              title="신규 주문"
+              sub="구매자 등록 후 아래에서 제품을 추가합니다."
+              action={
+                <button
+                  type="button"
+                  className="btn btn-light"
+                  onClick={() => {
+                    setIsCreateOrderPanelOpen(false)
+                    resetOrderFormState()
+                  }}
+                >
+                  닫기
+                </button>
+              }
+            >
+                <div className="inline-order-table-wrap">
+                  <table className="compact-table inline-order-table inline-order-header-table">
+                    <thead>
+                      <tr>
+                        <th>고객</th>
+                        <th>정산 날짜</th>
+                        <th>배송 유형</th>
+                        <th>기본 배송비</th>
+                        <th>주문 배송비</th>
+                        <th>관리</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>
+                          <div className="typeahead-field compact">
+                            <input
+                              value={customerQuery}
+                              onChange={(event) => {
+                                setCustomerQuery(event.target.value)
+                                setOrderForm((prev) => ({ ...prev, customer_id: '' }))
+                              }}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Tab' && customerSuggestions.length) {
+                                  event.preventDefault()
+                                  selectCustomer(customerSuggestions[0])
+                                }
+                              }}
+                              placeholder="고객명/인스타 ID"
+                            />
+                            <div className="typeahead-tags compact">
+                              {customerSuggestions.map((customer) => (
+                                <button
+                                  key={customer.id}
+                                  type="button"
+                                  className={`typeahead-tag ${String(orderForm.customer_id) === String(customer.id) ? 'active' : ''}`}
+                                  onClick={() => selectCustomer(customer)}
+                                >
+                                  {getCustomerOptionLabel(customer)}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </td>
+                        <td>
+                          <input
+                            type="date"
+                            value={orderForm.settlement_date}
+                            onChange={(event) => setOrderForm((prev) => ({ ...prev, settlement_date: event.target.value }))}
+                          />
+                        </td>
+                        <td>
+                          <select
+                            value={orderForm.shipping_type}
+                            onChange={(event) => setOrderForm((prev) => ({ ...prev, shipping_type: event.target.value }))}
+                          >
+                            <option value="direct">바로 배송</option>
+                            <option value="keep">Keep</option>
+                          </select>
+                        </td>
+                        <td>
+                          <input
+                            type="number"
+                            min="0"
+                            value={defaultShippingFee}
+                            onChange={(event) => {
+                              const nextFee = Number(event.target.value || 0)
+                              setDefaultShippingFee(nextFee)
+                              setOrderForm((prev) => ({ ...prev, shipping_fee: nextFee }))
+                            }}
+                          />
+                        </td>
+                        <td>
+                          <input
+                            type="number"
+                            min="0"
+                            value={orderForm.shipping_fee}
+                            onChange={(event) =>
+                              setOrderForm((prev) => ({ ...prev, shipping_fee: Number(event.target.value || 0) }))
+                            }
+                          />
+                        </td>
+                        <td>
+                          <button type="button" className="btn btn-primary" onClick={confirmOrderHeader} disabled={isConfirmingBuyer}>
+                            {isConfirmingBuyer ? '등록 중...' : '구매자 등록'}
+                          </button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
             </Card>
-          </section>
+            )}
+
+            <div className="order-group-list">
+              {liveInvoiceCustomerGroups.length ? (
+                <Card title="구매자별 정산서" sub="행을 클릭하면 판매 항목이, NO.를 클릭하면 메모가 열립니다.">
+                  <div className="inline-order-table-wrap">
+                    <table className="compact-table order-group-table">
+                      <thead>
+                        <tr>
+                          <th>NO.</th>
+                          <th>고객</th>
+                          <th>주문번호</th>
+                          <th>금액</th>
+                          <th>정산 날짜</th>
+                          <th>재고</th>
+                          <th>결제</th>
+                          <th>배송</th>
+                          <th>배송 유형</th>
+                          <th>관리</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {liveInvoiceCustomerGroups.map((group, index) => {
+                          const order = group.order
+                          const isExpanded = expandedOrderId === order.id
+
+                          return (
+                            <Fragment key={group.key}>
+                              <tr
+                                className={`clickable-row ${isExpanded ? 'active-row' : ''}`}
+                                onClick={() => setExpandedOrderId((prev) => (prev === order.id ? null : order.id))}
+                                onKeyDown={(event) => {
+                                  if (event.key === 'Enter' || event.key === ' ') {
+                                    event.preventDefault()
+                                    setExpandedOrderId((prev) => (prev === order.id ? null : order.id))
+                                  }
+                                }}
+                                tabIndex={0}
+                              >
+                                <td onClick={(event) => event.stopPropagation()}>
+                                  <button
+                                    type="button"
+                                    className="row-no-btn"
+                                    onClick={() => openMemoPopup(order)}
+                                  >
+                                    {index + 1}
+                                  </button>
+                                </td>
+                                <td>
+                                  <strong>{group.customer?.customer_name || group.customer?.instagram_id || `고객 #${group.key}`}</strong>
+                                  <div className="muted inline-note">{group.customer?.instagram_id || `고객 #${group.key}`}</div>
+                                </td>
+                                <td>{order.order_code}</td>
+                                <td>₩ {money(group.totalAmount)}</td>
+                                <td onClick={(event) => event.stopPropagation()}>
+                                  <input
+                                    type="date"
+                                    value={toDateKey(order.settlement_date)}
+                                    onChange={(event) => updateOrderSettlementDate(order, event.target.value)}
+                                    disabled={updatingSettlementDateOrderId === order.id}
+                                  />
+                                </td>
+                                <td onClick={(event) => event.stopPropagation()}>
+                                  {order.stock_released_at ? (
+                                    <button
+                                      type="button"
+                                      className="status-button"
+                                      onClick={() => toggleOrderStockRelease(order)}
+                                      disabled={releasingOrderId === order.id}
+                                    >
+                                      {releasingOrderId === order.id ? '처리 중...' : '출고 완료'}
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      className="status-button pending"
+                                      onClick={() => toggleOrderStockRelease(order)}
+                                      disabled={releasingOrderId === order.id}
+                                    >
+                                      {releasingOrderId === order.id ? '처리 중...' : '출고 대기'}
+                                    </button>
+                                  )}
+                                </td>
+                                <td onClick={(event) => event.stopPropagation()}>
+                                  <select
+                                    className={`table-status-select ${order.shipment?.payment_status || 'pending'}`}
+                                    value={order.shipment?.payment_status || 'pending'}
+                                    onChange={(event) => updateOrderPaymentStatus(order, event.target.value)}
+                                    disabled={updatingPaymentOrderId === order.id}
+                                  >
+                                    <option value="pending">입금 대기</option>
+                                    <option value="paid">입금 완료</option>
+                                  </select>
+                                </td>
+                                <td onClick={(event) => event.stopPropagation()}>
+                                  <select
+                                    className={`table-status-select ${order.shipment?.shipping_status || 'ready'}`}
+                                    value={order.shipment?.shipping_status || 'ready'}
+                                    onChange={(event) => updateOrderShippingStatus(order, event.target.value)}
+                                    disabled={updatingShippingOrderId === order.id}
+                                  >
+                                    <option value="ready">배송 준비</option>
+                                    <option value="shipped">배송 중</option>
+                                    <option value="delivered">배송 완료</option>
+                                  </select>
+                                </td>
+                                <td onClick={(event) => event.stopPropagation()}>
+                                  <select
+                                    className={`table-status-select ${order.shipment?.shipping_type || 'direct'}`}
+                                    value={order.shipment?.shipping_type || 'direct'}
+                                    onChange={(event) => updateOrderShippingType(order, event.target.value)}
+                                    disabled={updatingShippingTypeOrderId === order.id}
+                                  >
+                                    <option value="direct">바로 배송</option>
+                                    <option value="keep">Keep</option>
+                                  </select>
+                                </td>
+                                <td onClick={(event) => event.stopPropagation()}>
+                                  <button
+                                    type="button"
+                                    className="btn btn-light"
+                                    onClick={() => openInvoiceViewerForOrder(order)}
+                                  >
+                                    정산서 보기
+                                  </button>
+                                </td>
+                              </tr>
+
+                              {isExpanded ? (
+                                <tr>
+                                  <td colSpan={10}>
+                                    <div className="order-group-detail">
+                                      {order.stock_released_at ? (
+                                        <div className="warning-note">
+                                          이미 출고 처리된 주문입니다. 저장 시 재확인 팝업이 뜨고, 변경해도 이미 차감된 재고 수량은 자동으로 되돌아가지 않습니다.
+                                        </div>
+                                      ) : null}
+                                      <form className="form-grid" onSubmit={submitOrderDetail}>
+                                        <div className="full">
+                                          <div className="section-head compact">
+                                            <h4>판매 항목</h4>
+                                            <button type="button" className="btn btn-light" onClick={addOrderDetailItem}>
+                                              항목 추가
+                                            </button>
+                                          </div>
+
+                                          <div className="line-items">
+                                            {orderDetailForm.items.map((item, itemIndex) => (
+                                              <div className="line-item numbered" key={`group-detail-${order.id}-${itemIndex}-${item.product_id}`}>
+                                                <span className="line-item-no">{itemIndex + 1}</span>
+                                                <input
+                                                  type="text"
+                                                  list="product-options"
+                                                  value={getProductSearchValue(item)}
+                                                  onChange={(event) => applyProductSearchSelection(setOrderDetailItem, itemIndex, event.target.value)}
+                                                  placeholder="상품명 검색"
+                                                  required
+                                                />
+
+                                                <input
+                                                  type="number"
+                                                  min="1"
+                                                  value={item.quantity}
+                                                  onChange={(event) => setOrderDetailItem(itemIndex, 'quantity', event.target.value)}
+                                                  required
+                                                />
+
+                                                <input
+                                                  type="number"
+                                                  min="0"
+                                                  value={item.unit_price}
+                                                  onChange={(event) => setOrderDetailItem(itemIndex, 'unit_price', event.target.value)}
+                                                  required
+                                                />
+
+                                                <div className="line-total">
+                                                  ₩ {money(Number(item.quantity) * Number(item.unit_price))}
+                                                </div>
+
+                                                <button type="button" className="btn btn-light" onClick={() => removeOrderDetailItem(itemIndex)}>
+                                                  삭제
+                                                </button>
+                                              </div>
+                                            ))}
+                                          </div>
+                                        </div>
+
+                                        <div className="full actions-row">
+                                          <strong>
+                                            총액: ₩
+                                            {money(
+                                              orderDetailForm.items.reduce(
+                                                (acc, item) => acc + Number(item.quantity || 0) * Number(item.unit_price || 0),
+                                                0,
+                                              ),
+                                            )}
+                                          </strong>
+                                          <button type="submit" className="btn btn-primary" disabled={isOrderSaving}>
+                                            {isOrderSaving ? '저장 중...' : '판매 항목 저장'}
+                                          </button>
+                                        </div>
+                                      </form>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ) : null}
+                            </Fragment>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
+              ) : (
+                <Card title="구매자별 정산서" sub="선택한 라이브에 연결된 구매자가 없습니다.">
+                  <div className="muted">해당 라이브에 주문이 없습니다.</div>
+                </Card>
+              )}
+            </div>
+
+            {memoOrder ? (
+              <Modal
+                title={`${memoOrder.order_code} 메모`}
+                sub="이 주문에 대한 메모를 남깁니다."
+                onClose={closeMemoPopup}
+              >
+                <form className="form-grid" onSubmit={submitMemo}>
+                  <label className="full">
+                    주문 메모
+                    <textarea
+                      value={memoDraft}
+                      onChange={(event) => setMemoDraft(event.target.value)}
+                    />
+                  </label>
+
+                  <div className="full actions-row">
+                    <button type="button" className="btn btn-light" onClick={closeMemoPopup}>
+                      취소
+                    </button>
+                    <button type="submit" className="btn btn-primary" disabled={isSavingMemo}>
+                      {isSavingMemo ? '저장 중...' : '메모 저장'}
+                    </button>
+                  </div>
+                </form>
+              </Modal>
+            ) : null}
+          </div>
         )}
 
         {activeMenu === 'live-sessions' && (
@@ -2507,8 +3175,7 @@ export default function App() {
                   <tr>
                     <th>ID</th>
                     <th>제목</th>
-                    <th>시작</th>
-                    <th>종료</th>
+                    <th>날짜</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2527,69 +3194,59 @@ export default function App() {
                     >
                       <td>{live.id}</td>
                       <td>{live.live_title}</td>
-                      <td>{formatDateTime(live.live_started_at)}</td>
-                      <td>{formatDateTime(live.live_ended_at)}</td>
+                      <td>{toDateKey(live.live_started_at) || '-'}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </Card>
-
-            {isLiveModalOpen ? (
-              <Modal
-                title={editingLiveId ? '라이브 세션 수정' : '라이브 세션 추가'}
-                sub={editingLiveId ? '선택한 라이브 세션 정보를 수정합니다.' : '라이브 정보를 입력하세요.'}
-                onClose={closeLiveModal}
-              >
-                <form className="form-grid" onSubmit={submitLive}>
-                  <label>
-                    제목
-                    <input
-                      value={liveForm.live_title}
-                      onChange={(event) => setLiveForm((prev) => ({ ...prev, live_title: event.target.value }))}
-                      required
-                    />
-                  </label>
-
-                  <label>
-                    시작 일시
-                    <input
-                      type="datetime-local"
-                      value={liveForm.live_started_at}
-                      onChange={(event) => setLiveForm((prev) => ({ ...prev, live_started_at: event.target.value }))}
-                    />
-                  </label>
-
-                  <label>
-                    종료 일시
-                    <input
-                      type="datetime-local"
-                      value={liveForm.live_ended_at}
-                      onChange={(event) => setLiveForm((prev) => ({ ...prev, live_ended_at: event.target.value }))}
-                    />
-                  </label>
-
-                  <label className="full">
-                    메모
-                    <textarea
-                      value={liveForm.memo}
-                      onChange={(event) => setLiveForm((prev) => ({ ...prev, memo: event.target.value }))}
-                    />
-                  </label>
-
-                  <div className="full actions-row">
-                    <button type="button" className="btn btn-light" onClick={closeLiveModal}>
-                      취소
-                    </button>
-                    <button type="submit" className="btn btn-primary">
-                      {editingLiveId ? '수정 저장' : '저장'}
-                    </button>
-                  </div>
-                </form>
-              </Modal>
-            ) : null}
           </div>
         )}
+
+        {isLiveModalOpen ? (
+          <Modal
+            title={editingLiveId ? '라이브 세션 수정' : '라이브 세션 추가'}
+            sub={editingLiveId ? '선택한 라이브 세션 정보를 수정합니다.' : '라이브 정보를 입력하세요.'}
+            onClose={closeLiveModal}
+          >
+            <form className="form-grid" onSubmit={submitLive}>
+              <label>
+                제목
+                <input
+                  value={liveForm.live_title}
+                  onChange={(event) => setLiveForm((prev) => ({ ...prev, live_title: event.target.value }))}
+                  required
+                />
+              </label>
+
+              <label>
+                날짜
+                <input
+                  type="date"
+                  value={liveForm.live_started_at}
+                  onChange={(event) => setLiveForm((prev) => ({ ...prev, live_started_at: event.target.value }))}
+                />
+              </label>
+
+              <label className="full">
+                메모
+                <textarea
+                  value={liveForm.memo}
+                  onChange={(event) => setLiveForm((prev) => ({ ...prev, memo: event.target.value }))}
+                />
+              </label>
+
+              <div className="full actions-row">
+                <button type="button" className="btn btn-light" onClick={closeLiveModal}>
+                  취소
+                </button>
+                <button type="submit" className="btn btn-primary">
+                  {editingLiveId ? '수정 저장' : '저장'}
+                </button>
+              </div>
+            </form>
+          </Modal>
+        ) : null}
 
         {activeMenu === 'products' && (
           <div className="content-grid single">

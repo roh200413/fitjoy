@@ -110,6 +110,20 @@ class Shipment(Base, TimestampMixin):
     order = relationship("Order", back_populates="shipment")
 
 
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    access_pin_hash = Column(String(128), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
 class ChangeHistory(Base):
     __tablename__ = "change_histories"
 
