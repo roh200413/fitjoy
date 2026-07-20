@@ -11,7 +11,7 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8011}
+        VITE_API_BASE: ${VITE_API_BASE:-/api}
     image: ${FRONTEND_IMAGE:-fitjoy-frontend}:${IMAGE_TAG:-latest}
     ports:
       - "3100:80"

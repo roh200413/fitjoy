@@ -3,7 +3,7 @@ pipeline {
 
   environment {
     COMPOSE_PROJECT_NAME = 'fitjoy'
-    VITE_API_BASE = "${env.VITE_API_BASE ?: 'http://localhost:8011'}"
+    VITE_API_BASE = "${env.VITE_API_BASE ?: '/api'}"
   }
 
   options {

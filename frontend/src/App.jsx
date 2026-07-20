@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8005'
+const API_BASE = import.meta.env.VITE_API_BASE || '/api'
 const EXCHANGE_RATE_STORAGE_KEY = 'fitjoy-exchange-rates'
 const DEFAULT_SHIPPING_FEE_STORAGE_KEY = 'fitjoy-default-shipping-fee'
 const PIN_UNLOCKED_STORAGE_KEY = 'fitjoy-pin-unlocked'
@@ -179,7 +179,11 @@ function loadDefaultShippingFee() {
 }
 
 async function api(path, options) {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const normalizedBase = API_BASE.replace(/\/$/, '')
+  const normalizedPath = normalizedBase.endsWith('/api') && path.startsWith('/api/')
+    ? path.slice(4)
+    : path
+  const response = await fetch(`${normalizedBase}${normalizedPath}`, {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   })

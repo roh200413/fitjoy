@@ -7,7 +7,7 @@ RUN npm ci
 
 COPY . .
 
-ARG VITE_API_BASE=http://127.0.0.1:8005
+ARG VITE_API_BASE=/api
 ENV VITE_API_BASE=${VITE_API_BASE}
 
 RUN npm run build
